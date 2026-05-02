@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo is required for Rust pre-commit checks" >&2
+    exit 1
+fi
+
+if [ ! -f Cargo.toml ]; then
+    echo "error: Cargo.toml not found; cannot run Rust pre-commit checks" >&2
+    exit 1
+fi
+
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings -D unsafe_code -D clippy::pedantic

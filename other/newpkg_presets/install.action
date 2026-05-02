@@ -1,7 +1,0 @@
-[[ -z $PROTO_INSTALL ]] && setpkginstall 'proto.install'
-add_copy "$PROTO_INSTALL" "$pkgname.install"
-add_mod _set_install
-
-_set_install() {
-    sed -i "s#^install=.*#install='${pkgname}.install'#" PKGBUILD
-}

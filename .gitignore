@@ -1,8 +1,7 @@
-src
-pkg
+target/
+pkg/
 *pkg.tar.*
-pkgtools.tar.gz
+*.tar.gz
 .*.swp
 *.files.*
-scripts/*.pyc
 tags
