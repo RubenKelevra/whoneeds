@@ -74,26 +74,32 @@ impl std::error::Error for BackendError {}
 
 #[derive(Debug, Eq, PartialEq)]
 enum Dependents {
-    Some(Vec<String>),
+    Some {
+        explicit: Vec<String>,
+        automatic: Vec<String>,
+    },
     None,
 }
 
 impl Dependents {
     fn from_sets(
         package: &PackageName,
-        reverse_dependencies: &BTreeSet<String>,
+        mut reverse_dependencies: BTreeSet<String>,
         explicit_packages: &BTreeSet<String>,
     ) -> Self {
-        let packages = reverse_dependencies
-            .intersection(explicit_packages)
-            .filter(|candidate| candidate.as_str() != package.as_str())
-            .cloned()
-            .collect::<Vec<_>>();
+        reverse_dependencies.remove(package.as_str());
 
-        if packages.is_empty() {
+        let (explicit, automatic): (Vec<String>, Vec<String>) = reverse_dependencies
+            .into_iter()
+            .partition(|candidate| explicit_packages.contains(candidate));
+
+        if explicit.is_empty() && automatic.is_empty() {
             Self::None
         } else {
-            Self::Some(packages)
+            Self::Some {
+                explicit,
+                automatic,
+            }
         }
     }
 }
@@ -127,7 +133,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<ExitCode, CliError> {
     print_dependents(&package, &dependents);
 
     match dependents {
-        Dependents::Some(_) => Ok(ExitCode::from(EXIT_SUCCESS)),
+        Dependents::Some { .. } => Ok(ExitCode::from(EXIT_SUCCESS)),
         Dependents::None => Ok(ExitCode::from(EXIT_NO_DEPENDENTS)),
     }
 }
@@ -140,7 +146,7 @@ fn find_dependents(package: &PackageName) -> Result<Dependents, BackendError> {
 
     Ok(Dependents::from_sets(
         package,
-        &reverse_dependencies,
+        reverse_dependencies,
         &explicit_packages,
     ))
 }
@@ -165,45 +171,136 @@ fn command_lines<const N: usize>(program: &str, args: [&str; N]) -> Result<BTree
 }
 
 fn print_dependents(package: &PackageName, dependents: &Dependents) {
-    println!("Packages that depend on [{}]", package.as_str());
+    for line in dependent_output_lines(package, dependents) {
+        println!("{line}");
+    }
+}
 
+fn dependent_output_lines(package: &PackageName, dependents: &Dependents) -> Vec<String> {
     match dependents {
-        Dependents::Some(packages) => {
-            for package in packages {
-                println!("  {package}");
+        Dependents::Some {
+            explicit,
+            automatic,
+        } => {
+            let mut lines = Vec::with_capacity(explicit.len() + automatic.len() + 2);
+
+            if !explicit.is_empty() {
+                lines.push(format!(
+                    "Explicitly installed packages that depend on [{}]",
+                    package.as_str()
+                ));
+                lines.extend(explicit.iter().map(|package| format!("  {package}")));
             }
+
+            if !automatic.is_empty() {
+                lines.push(format!(
+                    "Other installed packages that depend on [{}]",
+                    package.as_str()
+                ));
+                lines.extend(automatic.iter().map(|package| format!("  {package}")));
+            }
+
+            lines
         }
-        Dependents::None => println!("  None"),
+        Dependents::None => vec![
+            format!("Packages that depend on [{}]", package.as_str()),
+            "  None".to_owned(),
+        ],
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Dependents, PackageName};
+    use super::{dependent_output_lines, Dependents, PackageName};
     use std::collections::BTreeSet;
 
     #[test]
-    fn filters_to_explicit_reverse_dependencies_and_excludes_query_package() {
-        let package = PackageName::new("zlib".to_owned());
-        let reverse_dependencies =
-            BTreeSet::from(["curl".to_owned(), "pacman".to_owned(), "zlib".to_owned()]);
-        let explicit_packages = BTreeSet::from(["pacman".to_owned(), "zlib".to_owned()]);
+    fn separates_explicit_and_automatic_reverse_dependencies() {
+        let package = PackageName::new("target".to_owned());
+        let reverse_dependencies = BTreeSet::from([
+            "automatic-a".to_owned(),
+            "explicit-a".to_owned(),
+            "explicit-b".to_owned(),
+            "target".to_owned(),
+        ]);
+        let explicit_packages = BTreeSet::from(["explicit-a".to_owned(), "explicit-b".to_owned()]);
 
         assert_eq!(
-            Dependents::from_sets(&package, &reverse_dependencies, &explicit_packages),
-            Dependents::Some(vec!["pacman".to_owned()])
+            Dependents::from_sets(&package, reverse_dependencies, &explicit_packages),
+            Dependents::Some {
+                explicit: vec!["explicit-a".to_owned(), "explicit-b".to_owned()],
+                automatic: vec!["automatic-a".to_owned()],
+            }
         );
     }
 
     #[test]
-    fn reports_no_dependents_when_only_query_package_is_explicit() {
-        let package = PackageName::new("zlib".to_owned());
-        let reverse_dependencies = BTreeSet::from(["zlib".to_owned()]);
-        let explicit_packages = BTreeSet::from(["zlib".to_owned()]);
+    fn renders_both_non_empty_categories() {
+        let package = PackageName::new("target".to_owned());
+        let dependents = Dependents::Some {
+            explicit: vec!["explicit-a".to_owned()],
+            automatic: vec!["automatic-a".to_owned()],
+        };
 
         assert_eq!(
-            Dependents::from_sets(&package, &reverse_dependencies, &explicit_packages),
-            Dependents::None
+            dependent_output_lines(&package, &dependents),
+            vec![
+                "Explicitly installed packages that depend on [target]".to_owned(),
+                "  explicit-a".to_owned(),
+                "Other installed packages that depend on [target]".to_owned(),
+                "  automatic-a".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn omits_empty_categories() {
+        let package = PackageName::new("target".to_owned());
+        let dependents = Dependents::Some {
+            explicit: Vec::new(),
+            automatic: vec!["automatic-a".to_owned()],
+        };
+
+        assert_eq!(
+            dependent_output_lines(&package, &dependents),
+            vec![
+                "Other installed packages that depend on [target]".to_owned(),
+                "  automatic-a".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_only_explicit_category_when_no_automatic_dependents_exist() {
+        let package = PackageName::new("target".to_owned());
+        let dependents = Dependents::Some {
+            explicit: vec!["explicit-a".to_owned()],
+            automatic: Vec::new(),
+        };
+
+        assert_eq!(
+            dependent_output_lines(&package, &dependents),
+            vec![
+                "Explicitly installed packages that depend on [target]".to_owned(),
+                "  explicit-a".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_none_when_no_reverse_dependencies_remain() {
+        let package = PackageName::new("target".to_owned());
+        let reverse_dependencies = BTreeSet::from(["target".to_owned()]);
+        let explicit_packages = BTreeSet::new();
+        let dependents = Dependents::from_sets(&package, reverse_dependencies, &explicit_packages);
+
+        assert_eq!(dependents, Dependents::None);
+        assert_eq!(
+            dependent_output_lines(&package, &dependents),
+            vec![
+                "Packages that depend on [target]".to_owned(),
+                "  None".to_owned(),
+            ]
         );
     }
 }
